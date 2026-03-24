@@ -3,12 +3,47 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, filedialog
 from PIL import Image, ImageTk
+from cryptography.fernet import Fernet
+import base64
+import config
 
-HOST = "127.0.0.1"
-PORT = 5001
+HOST = config.HOST
+PORT = config.PORT
+
+cipher = Fernet(config.FERNET_KEY)
+
+def encrypt(msg):
+    return cipher.encrypt(msg.encode())
+
+def decrypt(data):
+    try:
+        return cipher.decrypt(data).decode()
+    except:
+        return ""
 
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client.connect((HOST, PORT))
+
+def send(msg):
+    data = encrypt(msg)
+    length = len(data).to_bytes(4, "big")
+    client.sendall(length + data)
+
+def recv():
+    length_bytes = client.recv(4)
+    if not length_bytes:
+        return None
+
+    length = int.from_bytes(length_bytes, "big")
+
+    data = b""
+    while len(data) < length:
+        packet = client.recv(length - len(data))
+        if not packet:
+            return None
+        data += packet
+
+    return decrypt(data)
 
 symbol = ""
 buttons = []
@@ -19,11 +54,13 @@ avatar_photo = None
 
 def choose_action():
     global current_window
-    if current_window: current_window.destroy()
+    if current_window:
+        current_window.destroy()
 
     win = tk.Toplevel()
     current_window = win
     win.title("Выбор")
+
     tk.Label(win, text="Выберите действие", font=("Arial", 12)).pack(pady=10)
     tk.Button(win, text="Войти", width=20, command=lambda: open_auth(win, "LOGIN")).pack(pady=5)
     tk.Button(win, text="Регистрация", width=20, command=lambda: open_auth(win, "REGISTER")).pack(pady=5)
@@ -44,35 +81,37 @@ def open_auth(prev_window, mode):
     pass_entry = tk.Entry(win, show="*")
     pass_entry.pack()
 
-    def send():
-        email = email_entry.get()
-        password = pass_entry.get()
-        client.sendall(f"{mode} {email} {password}\n".encode())
+    def submit():
+        send(f"{mode} {email_entry.get()} {pass_entry.get()}")
 
-    tk.Button(win, text="Отправить", command=send).pack(pady=10)
+    tk.Button(win, text="Отправить", command=submit).pack(pady=10)
     tk.Button(win, text="Назад", command=choose_action).pack(pady=5)
 
 def choose_photo():
     global avatar_photo
+
     path = filedialog.askopenfilename()
     if not path:
         messagebox.showerror("Ошибка", "Выберите фото обязательно!")
-        return choose_photo()
+        return
 
     with open(path, "rb") as f:
         data = f.read()
 
-    size = len(data)
-    client.sendall(f"PHOTO {size}\n".encode())
-    client.sendall(data)
+    # ✅ теперь фото тоже шифруется
+    encoded = base64.b64encode(data).decode()
+    send(f"PHOTO {encoded}")
 
     img = Image.open(path)
     img = img.resize((60, 60))
     avatar_photo = ImageTk.PhotoImage(img)
 
 def build_game_ui():
-    global current_window
-    if current_window: current_window.destroy()
+    global current_window, status_label, frame
+
+    if current_window:
+        current_window.destroy()
+
     root.deiconify()
     root.title("Tic Tac Toe")
 
@@ -84,13 +123,26 @@ def build_game_ui():
         avatar_label.image = avatar_photo
         avatar_label.pack(side="left", padx=10)
 
-    status_label.pack(in_=top_frame, side="left", padx=10)
+    status_label = tk.Label(top_frame, text="")
+    status_label.pack(side="left", padx=10)
 
+    frame = tk.Frame(root)
     frame.pack(side="top", pady=20)
 
+    for r in range(3):
+        row = []
+        for c in range(3):
+            btn = tk.Button(frame, text=" ", width=10, height=4,
+                            command=lambda r=r, c=c: click(r, c))
+            btn.grid(row=r, column=c)
+            row.append(btn)
+        buttons.append(row)
+
 def click(r, c):
-    try: client.sendall(f"MOVE {r} {c}\n".encode())
-    except: pass
+    try:
+        send(f"MOVE {r} {c}")
+    except:
+        pass
 
 def update_board(state):
     cells = state.split(",")
@@ -101,53 +153,76 @@ def update_board(state):
 
 def receive():
     global symbol
-    buffer = ""
+
     while True:
         try:
-            data = client.recv(1024).decode()
+            msg = recv()
+            if not msg:
+                continue
         except:
-            print("Сервер отключился")
             break
-        if not data: break
 
-        buffer += data
-        while "\n" in buffer:
-            msg, buffer = buffer.split("\n",1)
-            if msg.startswith("ERROR"):
-                root.after(0, lambda: messagebox.showerror("Ошибка", msg))
-            elif msg=="OK":
-                root.after(0, lambda: messagebox.showinfo("Успех","Регистрация успешна"))
-            elif msg=="SUCCESS":
+        for line in msg.split("\n"):
+            if not line:
+                continue
+
+            if line.startswith("ERROR"):
+                root.after(0, lambda: messagebox.showerror("Ошибка", line))
+
+            elif line == "OK":
+                root.after(0, lambda: messagebox.showinfo("Успех", "Регистрация успешна"))
+
+            elif line == "SUCCESS":
                 root.after(0, choose_photo)
-            elif msg=="PHOTO_OK":
-                root.after(0, build_game_ui)
-            elif msg=="WAIT":
-                root.after(0, lambda: status_label.config(text="Waiting for opponent..."))
-            elif msg=="START":
-                root.after(0, lambda: status_label.config(text="Game started"))
-            elif msg.startswith("SYMBOL"):
-                symbol = msg.split()[1]
-                root.after(0, lambda: root.title(f"You are {symbol}"))
-            elif msg.startswith("BOARD"):
-                state = msg.split(" ",1)[1]
-                root.after(0, update_board,state)
-            elif msg.startswith("WIN"):
-                root.after(0, lambda: messagebox.showinfo("Game","Win"))
-            elif msg=="DRAW":
-                root.after(0, lambda: messagebox.showinfo("Game","Draw"))
-            elif msg=="OPPONENT_LEFT":
-                root.after(0, lambda: messagebox.showinfo("Game","Opponent left"))
 
-status_label = tk.Label(root,text="")
-frame = tk.Frame(root)
-for r in range(3):
-    row = []
-    for c in range(3):
-        btn = tk.Button(frame,text=" ", width=10, height=4, command=lambda r=r,c=c: click(r,c))
-        btn.grid(row=r,column=c)
-        row.append(btn)
-    buttons.append(row)
+            elif line == "PHOTO_OK":
+                root.after(0, build_game_ui)
+
+            elif line == "WAIT":
+                root.after(0, lambda: status_label.config(text="Waiting for opponent..."))
+
+            elif line == "START":
+                root.after(0, lambda: status_label.config(text="Game started"))
+
+            elif line.startswith("SYMBOL"):
+                symbol = line.split()[1]
+                root.after(0, lambda: root.title(f"You are {symbol}"))
+
+            elif line.startswith("BOARD"):
+                state = line.split(" ", 1)[1]
+                root.after(0, update_board, state)
+
+            elif line.startswith("WIN"):
+                root.after(0, lambda: messagebox.showinfo("Game", "Win"))
+
+            elif line == "DRAW":
+                root.after(0, lambda: messagebox.showinfo("Game", "Draw"))
+
+threading.Thread(target=receive, daemon=True).start()
+
+def on_close():
+    try:
+        client.shutdown(socket.SHUT_RDWR)
+        client.close()
+    except:
+        pass
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_close)
 
 choose_action()
+root.mainloop()
 threading.Thread(target=receive, daemon=True).start()
+
+def on_close():
+    try:
+        client.shutdown(socket.SHUT_RDWR)
+        client.close()
+    except:
+        pass
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_close)
+
+choose_action()
 root.mainloop()

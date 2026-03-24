@@ -2,13 +2,51 @@ import socket
 import threading
 import json
 import os
-
-HOST = "127.0.0.1"
-PORT = 5001
+import hashlib
+import base64
+from config import *
 
 sessions = []
 lock = threading.Lock()
-USERS_FILE = "users.json"
+
+def encrypt(msg):
+    return fernet.encrypt(msg.encode())
+
+def decrypt(data):
+    try:
+        return fernet.decrypt(data).decode()
+    except:
+        return ""
+
+def send(conn, msg):
+    try:
+        data = encrypt(msg)
+        length = len(data).to_bytes(4, "big")
+        conn.sendall(length + data)
+    except:
+        pass
+
+def recv(conn):
+    try:
+        length_bytes = conn.recv(4)
+        if not length_bytes:
+            return None
+
+        length = int.from_bytes(length_bytes, "big")
+
+        data = b""
+        while len(data) < length:
+            packet = conn.recv(length - len(data))
+            if not packet:
+                return None
+            data += packet
+
+        return decrypt(data)
+    except:
+        return None
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
 def load_users():
     if not os.path.exists(USERS_FILE):
@@ -32,10 +70,14 @@ class GameSession:
 
 def check_winner(board, sym):
     for i in range(3):
-        if all(board[i][j] == sym for j in range(3)): return True
-        if all(board[j][i] == sym for j in range(3)): return True
-    if board[0][0] == board[1][1] == board[2][2] == sym: return True
-    if board[0][2] == board[1][1] == board[2][0] == sym: return True
+        if all(board[i][j] == sym for j in range(3)):
+            return True
+        if all(board[j][i] == sym for j in range(3)):
+            return True
+    if board[0][0] == board[1][1] == board[2][2] == sym:
+        return True
+    if board[0][2] == board[1][1] == board[2][0] == sym:
+        return True
     return False
 
 def board_full(board):
@@ -44,144 +86,115 @@ def board_full(board):
 def send_board(session):
     state = ",".join(cell for row in session.board for cell in row)
     for p in session.players:
-        try:
-            p.sendall(f"BOARD {state}\n".encode())
-        except:
-            pass
-
-def recv_all(conn, size):
-    data = b""
-    while len(data) < size:
-        packet = conn.recv(size - len(data))
-        if not packet:
-            return None
-        data += packet
-    return data
+        send(p, f"BOARD {state}")
 
 def handle_auth(conn):
-    buffer = ""
     current_user = None
 
     while True:
-        try:
-            data = conn.recv(1024).decode()
-        except:
-            return None
+        data = recv(conn)
         if not data:
             return None
 
-        buffer += data
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
+        for line in data.split("\n"):
             parts = line.split()
             if not parts:
                 continue
 
             if parts[0] == "REGISTER":
                 email, password = parts[1], parts[2]
+
                 if email in users:
-                    conn.sendall("ERROR User exists\n".encode())
+                    send(conn, "ERROR User exists")
                 else:
-                    users[email] = {"password": password, "photo": ""}
+                    users[email] = {
+                        "password": hash_password(password),
+                        "photo": ""
+                    }
                     save_users(users)
-                    conn.sendall("OK\n".encode())
+                    send(conn, "OK")
 
             elif parts[0] == "LOGIN":
                 email, password = parts[1], parts[2]
-                if email in users and users[email]["password"] == password:
+
+                if email in users and users[email]["password"] == hash_password(password):
                     current_user = email
-                    conn.sendall("SUCCESS\n".encode())
+                    send(conn, "SUCCESS")
                 else:
-                    conn.sendall("ERROR Login failed\n".encode())
+                    send(conn, "ERROR Login failed")
 
             elif parts[0] == "PHOTO":
                 if current_user:
                     try:
-                        size = int(parts[1])
-                        data_bytes = recv_all(conn, size)
-                        if not data_bytes:
-                            return None
+                        encoded = parts[1]
+                        data_bytes = base64.b64decode(encoded)
 
-                        os.makedirs("avatars", exist_ok=True)
-                        filepath = f"avatars/{current_user}.jpg"
-                        with open(filepath, "wb") as f:
+                        os.makedirs(AVATAR_DIR, exist_ok=True)
+                        path = f"{AVATAR_DIR}/{current_user}.jpg"
+
+                        with open(path, "wb") as f:
                             f.write(data_bytes)
 
-                        users[current_user]["photo"] = filepath
+                        users[current_user]["photo"] = path
                         save_users(users)
-                        conn.sendall("PHOTO_OK\n".encode())
+
+                        send(conn, "PHOTO_OK")
                         return current_user
                     except:
-                        conn.sendall("ERROR Photo failed\n".encode())
+                        send(conn, "ERROR Photo failed")
 
 def handle_player(session, conn, pid):
-    try:
-        conn.sendall(f"SYMBOL {session.symbols[pid]}\n".encode())
-    except:
-        conn.close()
-        return
+    send(conn, f"SYMBOL {session.symbols[pid]}")
 
-    buffer = ""
-    try:
-        while session.game_running:
-            try:
-                data = conn.recv(1024).decode()
-            except:
-                break
-            if not data:
-                break
+    while session.game_running:
+        data = recv(conn)
+        if not data:
+            break
 
-            buffer += data
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                parts = line.split()
-                if len(parts) != 3 or parts[0] != "MOVE":
-                    continue
+        for line in data.split("\n"):
+            parts = line.split()
+            if len(parts) != 3 or parts[0] != "MOVE":
+                continue
 
-                _, r, c = parts
-                try:
-                    r = int(r)
-                    c = int(c)
-                except:
-                    continue
-                if r not in range(3) or c not in range(3):
-                    continue
+            r, c = int(parts[1]), int(parts[2])
 
-                if pid == session.current_player and session.board[r][c] == " ":
-                    session.board[r][c] = session.symbols[pid]
-                    send_board(session)
+            if r not in range(3) or c not in range(3):
+                continue
 
-                    if check_winner(session.board, session.symbols[pid]):
-                        for p in session.players:
-                            try: p.sendall(f"WIN {session.symbols[pid]}\n".encode())
-                            except: pass
-                        session.game_running = False
-                        break
+            if pid == session.current_player and session.board[r][c] == " ":
+                session.board[r][c] = session.symbols[pid]
+                send_board(session)
 
-                    if board_full(session.board):
-                        for p in session.players:
-                            try: p.sendall("DRAW\n".encode())
-                            except: pass
-                        session.game_running = False
-                        break
+                if check_winner(session.board, session.symbols[pid]):
+                    for p in session.players:
+                        send(p, f"WIN {session.symbols[pid]}")
+                    session.game_running = False
+                    break
 
-                    session.current_player = 1 - session.current_player
-    finally:
-        conn.close()
+                if board_full(session.board):
+                    for p in session.players:
+                        send(p, "DRAW")
+                    session.game_running = False
+                    break
+
+                session.current_player = 1 - session.current_player
+
+    conn.close()
 
 def get_session():
     with lock:
-        for session in sessions:
-            if len(session.players) < 2:
-                return session
-        new_session = GameSession()
-        sessions.append(new_session)
-        return new_session
+        for s in sessions:
+            if len(s.players) < 2:
+                return s
+        s = GameSession()
+        sessions.append(s)
+        return s
 
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((HOST, PORT))
     server.listen()
+
     print("Server started...")
 
     while True:
@@ -198,10 +211,10 @@ def start_server():
         session.players.append(conn)
 
         if len(session.players) == 1:
-            conn.sendall("WAIT\n".encode())
-        elif len(session.players) == 2:
+            send(conn, "WAIT")
+        else:
             for p in session.players:
-                p.sendall("START\n".encode())
+                send(p, "START")
 
         threading.Thread(
             target=handle_player,
