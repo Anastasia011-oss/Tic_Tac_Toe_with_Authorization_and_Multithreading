@@ -88,6 +88,59 @@ def send_board(session):
     for p in session.players:
         send(p, f"BOARD {state}")
 
+def handle_admin(conn):
+    while True:
+        data = recv(conn)
+        if not data:
+            break
+
+        for line in data.split("\n"):
+            parts = line.split()
+            if not parts:
+                continue
+
+            if parts[0] == "GET_USERS":
+                # email | hash | banned
+                result = []
+                for email, info in users.items():
+                    result.append(f"{email}|{info.get('password')}|{info.get('banned', False)}")
+
+                send(conn, "USERS " + ",".join(result))
+
+            elif parts[0] == "DELETE_USER":
+                email = parts[1]
+
+                if email in users:
+                    del users[email]
+                    save_users(users)
+                    send(conn, "OK")
+                else:
+                    send(conn, "ERROR No user")
+
+            elif parts[0] == "BAN_USER":
+                email = parts[1]
+
+                if email in users:
+                    users[email]["banned"] = True
+                    save_users(users)
+                    send(conn, "OK")
+                else:
+                    send(conn, "ERROR No user")
+
+            elif parts[0] == "GET_SESSIONS":
+                result = []
+
+                with lock:
+                    for s in sessions:
+                        if len(s.players) == 2:
+                            result.append("Game: 2 players")
+                        else:
+                            result.append("Waiting...")
+
+                send(conn, "SESSIONS " + "; ".join(result))
+
+    conn.close()
+
 def handle_auth(conn):
     current_user = None
 
@@ -109,7 +162,8 @@ def handle_auth(conn):
                 else:
                     users[email] = {
                         "password": hash_password(password),
-                        "photo": ""
+                        "photo": "",
+                        "banned": False
                     }
                     save_users(users)
                     send(conn, "OK")
@@ -117,9 +171,20 @@ def handle_auth(conn):
             elif parts[0] == "LOGIN":
                 email, password = parts[1], parts[2]
 
-                if email in users and users[email]["password"] == hash_password(password):
-                    current_user = email
-                    send(conn, "SUCCESS")
+                if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+                    send(conn, "ADMIN")
+                    return "admin"
+
+                if email in users:
+                    if users[email].get("banned", False):
+                        send(conn, "ERROR BANNED")
+                        continue
+
+                    if users[email]["password"] == hash_password(password):
+                        current_user = email
+                        send(conn, "SUCCESS")
+                    else:
+                        send(conn, "ERROR Login failed")
                 else:
                     send(conn, "ERROR Login failed")
 
@@ -153,13 +218,11 @@ def handle_player(session, conn, pid):
 
         for line in data.split("\n"):
             parts = line.split()
+
             if len(parts) != 3 or parts[0] != "MOVE":
                 continue
 
             r, c = int(parts[1]), int(parts[2])
-
-            if r not in range(3) or c not in range(3):
-                continue
 
             if pid == session.current_player and session.board[r][c] == " ":
                 session.board[r][c] = session.symbols[pid]
@@ -202,6 +265,11 @@ def start_server():
         print("Connected:", addr)
 
         user = handle_auth(conn)
+
+        if user == "admin":
+            threading.Thread(target=handle_admin, args=(conn,), daemon=True).start()
+            continue
+
         if not user:
             conn.close()
             continue

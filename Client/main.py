@@ -98,7 +98,6 @@ def choose_photo():
     with open(path, "rb") as f:
         data = f.read()
 
-    # ✅ теперь фото тоже шифруется
     encoded = base64.b64encode(data).decode()
     send(f"PHOTO {encoded}")
 
