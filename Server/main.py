@@ -11,13 +11,10 @@ from config import *
 sessions = []
 lock = threading.Lock()
 
-server = 'DESKTOP-EOO77GM\\SQLEXPRESS'
-database = 'TicTacToeDB'
-
 conn_str = (
     f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-    f"SERVER={server};"
-    f"DATABASE={database};"
+    f"SERVER={DB_SERVER};"
+    f"DATABASE={DB_NAME};"
     f"Trusted_Connection=yes;"
 )
 
