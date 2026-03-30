@@ -18,6 +18,7 @@ def decrypt(data):
     except:
         return ""
 
+# Подключаемся к серверу
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client.connect((HOST, PORT))
 
@@ -32,7 +33,6 @@ def recv():
         return None
 
     length = int.from_bytes(length_bytes, "big")
-
     data = b""
     while len(data) < length:
         packet = client.recv(length - len(data))
@@ -42,8 +42,10 @@ def recv():
 
     return decrypt(data)
 
+# Логинимся как админ (указан в сервере)
 send("LOGIN admin admin123")
 
+# GUI
 root = tk.Tk()
 root.title("Admin Panel")
 
@@ -58,6 +60,7 @@ selected_user = tk.StringVar()
 entry = tk.Entry(root)
 entry.pack(pady=5)
 
+# Кнопки
 def get_users():
     users_listbox.delete(0, tk.END)
     send("GET_USERS")
@@ -81,6 +84,7 @@ tk.Button(root, text="Активные игры", command=get_sessions).pack(pad
 tk.Button(root, text="Удалить пользователя", command=delete_user).pack(pady=5)
 tk.Button(root, text="Забанить выбранного", command=ban_user).pack(pady=5)
 
+# Поток для получения данных от сервера
 def receive():
     while True:
         msg = recv()
@@ -93,7 +97,6 @@ def receive():
                 users = line.replace("USERS ", "").split(",")
 
                 users_listbox.delete(0, tk.END)
-
                 output.insert(tk.END, "=== USERS ===\n")
 
                 for u in users:
@@ -101,7 +104,6 @@ def receive():
                     if len(parts) == 3:
                         email = parts[0]
                         banned = parts[2]
-
                         display = f"{email} | banned={banned}"
                         users_listbox.insert(tk.END, display)
                         output.insert(tk.END, display + "\n")
