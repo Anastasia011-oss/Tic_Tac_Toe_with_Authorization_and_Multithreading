@@ -33,95 +33,117 @@ def recv():
     if not length_bytes:
         return None
     length = int.from_bytes(length_bytes, "big")
+
     data = b""
     while len(data) < length:
         packet = client.recv(length - len(data))
         if not packet:
             return None
         data += packet
+
     return decrypt(data)
 
+
 symbol = ""
-current_turn = ""
 buttons = []
 status_label = None
 ui_ready = False
 last_state = None
+photo_sent = False
+
 root = tk.Tk()
 root.withdraw()
+
+avatars = [None, None]
+avatar_labels = []
 current_window = None
-avatar_photo = None
+
 
 def choose_action():
     global current_window
+
     if current_window:
         current_window.destroy()
+
     win = tk.Toplevel()
     current_window = win
     win.title("Выбор")
-    tk.Button(win, text="Войти", command=lambda: open_auth(win, "LOGIN")).pack()
-    tk.Button(win, text="Регистрация", command=lambda: open_auth(win, "REGISTER")).pack()
+
+    tk.Button(win, text="Войти",
+              command=lambda: open_auth(win, "LOGIN")).pack(pady=5)
+
+    tk.Button(win, text="Регистрация",
+              command=lambda: open_auth(win, "REGISTER")).pack(pady=5)
+
 
 def open_auth(prev, mode):
     prev.destroy()
+
     win = tk.Toplevel()
+    win.title(mode)
+
     tk.Label(win, text="Email").pack()
     email = tk.Entry(win)
     email.pack()
+
     tk.Label(win, text="Пароль").pack()
     pw = tk.Entry(win, show="*")
     pw.pack()
-    tk.Button(win, text="OK", command=lambda: send(f"{mode} {email.get()} {pw.get()}")).pack()
 
-
-root.deiconify()
+    tk.Button(win, text="OK",
+              command=lambda: send(f"{mode} {email.get()} {pw.get()}")).pack(pady=5)
 
 
 def choose_photo():
-    global avatar_photo, current_window
+    global photo_sent
+
     path = filedialog.askopenfilename()
     if not path:
         messagebox.showerror("Ошибка", "Выберите фото!")
         return
+
     with open(path, "rb") as f:
         data = f.read()
-    send(f"PHOTO {base64.b64encode(data).decode()}")
-    img = Image.open(path).resize((60, 60))
-    avatar_photo = ImageTk.PhotoImage(img)
 
-    if current_window:
-        current_window.destroy()  # закрываем окно выбора фото
+    send(f"UPLOAD_PHOTO {base64.b64encode(data).decode()}")
 
-def choose_photo():
-    global avatar_photo
-    path = filedialog.askopenfilename()
-    if not path:
-        messagebox.showerror("Ошибка", "Выберите фото!")
-        return
-    with open(path, "rb") as f:
-        data = f.read()
-    send(f"PHOTO {base64.b64encode(data).decode()}")
     img = Image.open(path).resize((60, 60))
-    avatar_photo = ImageTk.PhotoImage(img)
+    photo = ImageTk.PhotoImage(img)
+
+    avatars[0] = photo
+    photo_sent = True
+
 
 def build_game_ui():
-    global status_label, buttons, ui_ready, last_state
+    global status_label, buttons, ui_ready, last_state, avatar_labels
+
     root.deiconify()
+
+    for widget in root.winfo_children():
+        widget.destroy()
+
     top = tk.Frame(root)
     top.pack()
 
-    if avatar_photo:
-        tk.Label(top, image=avatar_photo).pack(side="left")
+    avatar_labels.clear()
 
-    status_label = tk.Label(top, text="Waiting...")
-    status_label.pack(side="left")
+    for i in range(2):
+        lbl = tk.Label(top)
+        lbl.pack(side="left", padx=5)
+        avatar_labels.append(lbl)
 
-    tk.Button(top, text="История", command=request_history).pack(side="right")
+        if avatars[i]:
+            lbl.config(image=avatars[i])
+            lbl.image = avatars[i]
+
+    status_label = tk.Label(top, text="Waiting for opponent...")
+    status_label.pack(side="left", padx=10)
 
     grid = tk.Frame(root)
     grid.pack()
 
     buttons.clear()
+
     for r in range(3):
         row = []
         for c in range(3):
@@ -141,78 +163,30 @@ def build_game_ui():
     if last_state:
         update_board(last_state)
 
+
 def update_board(state):
-    global buttons, ui_ready
-    if not ui_ready or len(buttons) != 3:
+    if not ui_ready:
         return
+
     cells = state.split(",")
     if len(cells) != 9:
         return
+
     for i in range(9):
         r = i // 3
         c = i % 3
-        if r < len(buttons) and c < len(buttons[r]):
-            buttons[r][c]["text"] = cells[i]
-
-
-def request_history():
-    send("GET_FULL_HISTORY 1")
-
-def show_full_history(data):
-    win = tk.Toplevel()
-    win.title("История пользователя")
-
-    games_part, bans_part = data.split("#")
-
-    tk.Label(win, text="=== ИГРЫ ===").pack()
-
-    if games_part:
-        for g in games_part.split(";"):
-            if not g:
-                continue
-
-            date, p1, p2, win_id = g.split("|")
-
-            if win_id == "None":
-                result = "Ничья"
-            elif win_id == p1:
-                result = f"Победил: {p1}"
-            else:
-                result = f"Победил: {p2}"
-
-            text = f"{date} | {p1} vs {p2} | {result}"
-            tk.Label(win, text=text).pack()
-
-    tk.Label(win, text="=== БАНЫ ===").pack()
-
-    if bans_part:
-        for b in bans_part.split(";"):
-            if not b:
-                continue
-
-            ban_date, unban_date = b.split("|")
-
-            if unban_date == "None":
-                status = "Активен"
-            else:
-                status = f"Разбан: {unban_date}"
-
-            text = f"Бан: {ban_date} | {status}"
-            tk.Label(win, text=text).pack()
+        buttons[r][c]["text"] = cells[i]
 
 
 def receive():
     global symbol, last_state
+
     while True:
         msg = recv()
         print("RECV:", msg)
 
         if msg is None:
-            print("Connection lost")
             break
-
-        if msg == "":
-            continue
 
         for line in msg.split("\n"):
             line = line.strip()
@@ -221,33 +195,29 @@ def receive():
 
             print("LINE:", line)
 
-            if line == "SUCCESS":
-                root.after(0, choose_photo)
+            if line == "NEED_PHOTO":
+                if not photo_sent:
+                    root.after(0, choose_photo)
 
-            elif line == "PHOTO_OK":
+            elif line == "SUCCESS":
                 root.after(0, build_game_ui)
 
-            elif line == "WAIT":
-                root.after(0, lambda: status_label and status_label.config(
-                    text="Waiting for opponent..."
-                ))
+                if not photo_sent:
+                    root.after(0, choose_photo)
 
-            elif line == "START":
-                root.after(0, lambda: status_label and status_label.config(
-                    text="Game started"
+            elif line == "WAIT":
+                root.after(0, lambda: (
+                    status_label.config(text="Waiting for opponent...")
+                    if status_label else None
                 ))
 
             elif line.startswith("SYMBOL"):
-                parts = line.split()
-                if len(parts) > 1:
-                    symbol = parts[1]
+                symbol = line.split()[1]
 
             elif line.startswith("BOARD"):
-                parts = line.split(" ", 1)
-                if len(parts) > 1:
-                    state = parts[1]
-                    last_state = state
-                    root.after(0, update_board, state)
+                state = line.split(" ", 1)[1]
+                last_state = state
+                root.after(0, update_board, state)
 
             elif line.startswith("WIN"):
                 root.after(0, lambda: messagebox.showinfo("Game", "You win!"))
@@ -255,12 +225,9 @@ def receive():
             elif line == "DRAW":
                 root.after(0, lambda: messagebox.showinfo("Game", "Draw"))
 
-            elif line.startswith("FULL_HISTORY"):
-                data = line.split(" ", 1)[1]
-                root.after(0, show_full_history, data)
-
             elif line.startswith("ERROR"):
                 root.after(0, lambda: messagebox.showerror("Error", line))
+
 
 threading.Thread(target=receive, daemon=True).start()
 

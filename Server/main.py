@@ -1,6 +1,5 @@
 import socket
 import threading
-import json
 import os
 import hashlib
 import base64
@@ -47,36 +46,133 @@ def recv(conn):
         if not length_bytes:
             return None
         length = int.from_bytes(length_bytes, "big")
+
         data = b""
         while len(data) < length:
             packet = conn.recv(length - len(data))
             if not packet:
                 return None
             data += packet
+
         return decrypt(data)
     except:
         return None
 
 
-def save_game(player1, player2, winner):
+def save_game(p1, p2, winner):
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO GameHistory (Player1Id, Player2Id, WinnerId) VALUES (?, ?, ?)",
-            player1, player2, winner
+            "INSERT INTO GameHistory (Player1Id, Player2Id, WinnerId) OUTPUT INSERTED.Id VALUES (?, ?, ?)",
+            p1, p2, winner
+        )
+        game_id = cursor.fetchone()[0]
+        conn.commit()
+        return game_id
+
+
+def update_game_winner(game_id, winner):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE GameHistory SET WinnerId=? WHERE Id=?",
+            winner, game_id
         )
         conn.commit()
 
-def get_user_full_history(user_id):
+
+def save_move(game_id, player_id, x, y):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO Moves (GameId, PlayerId, X, Y) VALUES (?, ?, ?, ?)",
+            game_id, player_id, x, y
+        )
+        conn.commit()
+
+
+def get_moves_by_game(game_id):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT MoveTime, PlayerId, X, Y
+            FROM Moves
+            WHERE GameId=?
+            ORDER BY MoveTime
+        """, game_id)
+        return cursor.fetchall()
+
+
+def update_photo(email, path):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE Users SET PhotoPath=? WHERE Email=?", path, email)
+        conn.commit()
+
+
+def get_photo(uid):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT PhotoPath FROM Users WHERE Id=?", uid)
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+
+def get_all_users():
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT Email, PasswordHash, Banned FROM Users")
+        return cursor.fetchall()
+
+
+def ban_user(email):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE Users SET Banned=1 WHERE Email=?", email)
+        cursor.execute("""
+            INSERT INTO BanHistory (UserId, BanDate, UnbanDate)
+            SELECT Id, GETDATE(), NULL FROM Users WHERE Email=?
+        """, email)
+        conn.commit()
+
+
+def unban_user(email):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE Users SET Banned=0 WHERE Email=?", email)
+        cursor.execute("""
+            UPDATE BanHistory
+            SET UnbanDate=GETDATE()
+            WHERE UserId=(SELECT Id FROM Users WHERE Email=?)
+            AND UnbanDate IS NULL
+        """, email)
+        conn.commit()
+
+
+def delete_user(email):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM Users WHERE Email=?", email)
+        conn.commit()
+
+
+def get_user_full_history_by_email(email):
     with get_conn() as conn:
         cursor = conn.cursor()
 
+        cursor.execute("SELECT Id FROM Users WHERE Email=?", email)
+        row = cursor.fetchone()
+        if not row:
+            return [], []
+
+        uid = row[0]
+
         cursor.execute("""
-            SELECT GameDate, Player1Id, Player2Id, WinnerId
+            SELECT Id, GameDate, Player1Id, Player2Id, WinnerId
             FROM GameHistory
             WHERE Player1Id=? OR Player2Id=?
             ORDER BY GameDate DESC
-        """, user_id, user_id)
+        """, uid, uid)
         games = cursor.fetchall()
 
         cursor.execute("""
@@ -84,128 +180,10 @@ def get_user_full_history(user_id):
             FROM BanHistory
             WHERE UserId=?
             ORDER BY BanDate DESC
-        """, user_id)
+        """, uid)
         bans = cursor.fetchall()
 
         return games, bans
-
-
-def get_all_users():
-    with get_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT Email, PasswordHash, Banned FROM [Users]")
-        return cursor.fetchall()
-
-def ban_user(email):
-    with get_conn() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT Id FROM Users WHERE Email=?", email)
-        user_id = cursor.fetchone()[0]
-
-        cursor.execute("UPDATE [Users] SET [Banned]=1 WHERE [Email]=?", email)
-
-        cursor.execute(
-            "INSERT INTO BanHistory (UserId) VALUES (?)",
-            user_id
-        )
-
-        conn.commit()
-
-def unban_user(email):
-    with get_conn() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT Id FROM Users WHERE Email=?", email)
-        user_id = cursor.fetchone()[0]
-
-        cursor.execute("UPDATE [Users] SET [Banned]=0 WHERE [Email]=?", email)
-
-        cursor.execute("""
-            UPDATE BanHistory
-            SET UnbanDate = GETDATE()
-            WHERE UserId=? AND UnbanDate IS NULL
-        """, user_id)
-
-        conn.commit()
-
-def delete_user(email):
-    with get_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM [Users] WHERE [Email]=?", email)
-        conn.commit()
-
-
-class GameSession:
-    def __init__(self):
-        self.board = [[" "] * 3 for _ in range(3)]
-        self.players = []
-        self.player_ids = []
-        self.symbols = ["X", "O"]
-        self.current_player = 0
-        self.game_running = True
-
-def check_winner(board, sym):
-    for i in range(3):
-        if all(board[i][j] == sym for j in range(3)):
-            return True
-        if all(board[j][i] == sym for j in range(3)):
-            return True
-    if board[0][0] == board[1][1] == board[2][2] == sym:
-        return True
-    if board[0][2] == board[1][1] == board[2][0] == sym:
-        return True
-    return False
-
-def board_full(board):
-    return all(cell != " " for row in board for cell in row)
-
-def send_board(session):
-    state = ",".join(cell for row in session.board for cell in row)
-    for p in session.players:
-        send(p, f"BOARD {state}")
-
-
-def check_user(email, password):
-    if email == "admin" and password == "admin123":
-        return {"Id": -1}
-
-    with get_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT Id, PasswordHash, Banned FROM [Users] WHERE [Email]=?", email)
-        row = cursor.fetchone()
-        if not row:
-            return None
-
-        user_id, db_hash, banned = row
-
-        if banned:
-            return "BANNED"
-
-        if db_hash == hash_password(password):
-            return {"Id": user_id}
-
-        return None
-
-def register_user(email, password):
-    with get_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT Id FROM [Users] WHERE [Email]=?", email)
-        if cursor.fetchone():
-            return False
-
-        cursor.execute(
-            "INSERT INTO [Users] ([Email], [PasswordHash], [Banned], [PhotoPath]) VALUES (?, ?, 0, '')",
-            email, hash_password(password)
-        )
-        conn.commit()
-        return True
-
-def update_photo(email, path):
-    with get_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE [Users] SET [PhotoPath]=? WHERE [Email]=?", path, email)
-        conn.commit()
 
 
 def handle_admin(conn):
@@ -224,6 +202,7 @@ def handle_admin(conn):
             if cmd == "GET_USERS":
                 users = get_all_users()
                 result = []
+
                 for u in users:
                     email, pwd, banned = u
                     result.append(f"{email}|{pwd}|{int(banned)}")
@@ -231,82 +210,26 @@ def handle_admin(conn):
                 send(conn, "USERS " + ",".join(result))
 
             elif cmd == "BAN_USER":
-                if len(parts) > 1:
-                    ban_user(parts[1])
-                    send(conn, "OK")
+                ban_user(parts[1])
+                send(conn, "OK")
 
             elif cmd == "UNBAN_USER":
-                if len(parts) > 1:
-                    unban_user(parts[1])
-                    send(conn, "OK")
+                unban_user(parts[1])
+                send(conn, "OK")
 
             elif cmd == "DELETE_USER":
-                if len(parts) > 1:
-                    delete_user(parts[1])
-                    send(conn, "OK")
-
-            elif cmd == "GET_SESSIONS":
-                with lock:
-                    active = len([s for s in sessions if len(s.players) > 0])
-                send(conn, f"SESSIONS Active games: {active}")
-
-            elif cmd == "GET_FULL_HISTORY":
-                if len(parts) < 2:
-                    send(conn, "ERROR Invalid command")
-                    continue
-
-                try:
-                    uid = int(parts[1])
-                except:
-                    send(conn, "ERROR Invalid ID")
-                    continue
-
-                games, bans = get_user_full_history(uid)
-
-                game_data = []
-                for g in games:
-                    date, p1, p2, win = g
-                    game_data.append(f"{date}|{p1}|{p2}|{win}")
-
-                ban_data = []
-                for b in bans:
-                    ban_date, unban_date = b
-                    ban_data.append(f"{ban_date}|{unban_date}")
-
-                send(conn, "FULL_HISTORY " +
-                     ";".join(game_data) + "#" +
-                     ";".join(ban_data))
+                delete_user(parts[1])
+                send(conn, "OK")
 
             elif cmd == "GET_FULL_HISTORY_BY_EMAIL":
-                if len(parts) < 2:
-                    send(conn, "ERROR No email")
-                    continue
-
                 email = parts[1]
 
-                try:
-                    with get_conn() as db:
-                        cursor = db.cursor()
-                        cursor.execute("SELECT Id FROM Users WHERE Email=?", email)
-                        row = cursor.fetchone()
-
-                        if not row:
-                            send(conn, "ERROR User not found")
-                            continue
-
-                        uid = row[0]
-
-                except Exception as e:
-                    print("DB ERROR:", e)
-                    send(conn, "ERROR DB failure")
-                    continue
-
-                games, bans = get_user_full_history(uid)
+                games, bans = get_user_full_history_by_email(email)
 
                 game_data = []
                 for g in games:
-                    date, p1, p2, win = g
-                    game_data.append(f"{date}|{p1}|{p2}|{win}")
+                    gid, date, p1, p2, win = g
+                    game_data.append(f"{gid}|{date}|{p1}|{p2}|{win}")
 
                 ban_data = []
                 for b in bans:
@@ -316,6 +239,59 @@ def handle_admin(conn):
                 send(conn, "FULL_HISTORY " +
                      ";".join(game_data) + "#" +
                      ";".join(ban_data))
+
+            elif cmd == "GET_MOVES_BY_GAME":
+                game_id = parts[1]
+
+                moves = get_moves_by_game(game_id)
+
+                result = []
+                for m in moves:
+                    time, player, x, y = m
+                    result.append(f"{time}|{player}|{x}|{y}")
+
+                send(conn, "MOVES " + ";".join(result))
+
+
+
+def check_user(email, password):
+    if email == "admin" and password == "admin123":
+        return {"Id": -1}
+
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT Id, PasswordHash, Banned FROM Users WHERE Email=?", email)
+        row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        uid, db_hash, banned = row
+
+        if banned:
+            return "BANNED"
+
+        if db_hash == hash_password(password):
+            return {"Id": uid}
+
+        return None
+
+
+def register_user(email, password):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT Id FROM Users WHERE Email=?", email)
+        if cursor.fetchone():
+            return False
+
+        cursor.execute(
+            "INSERT INTO Users (Email, PasswordHash, Banned, PhotoPath) VALUES (?, ?, 0, '')",
+            email, hash_password(password)
+        )
+        conn.commit()
+        return True
+
 
 def handle_auth(conn):
     current_user = None
@@ -333,48 +309,137 @@ def handle_auth(conn):
 
             cmd = parts[0]
 
-            if cmd == "REGISTER":
-                if register_user(parts[1], parts[2]):
-                    send(conn, "OK")
-                else:
-                    send(conn, "ERROR User exists")
+            # ===== LOGIN =====
+            if cmd == "LOGIN":
+                email = parts[1]
+                password = parts[2]
 
-            elif cmd == "LOGIN":
-                status = check_user(parts[1], parts[2])
+                status = check_user(email, password)
 
                 if status == "BANNED":
-                    send(conn, "ERROR BANNED")
+                    send(conn, "BANNED")
+                    continue
 
-                elif status:
-                    current_user = parts[1]
+                if status:
+                    current_user = email
                     current_user_id = status["Id"]
-                    send(conn, "SUCCESS")
+
+                    photo = get_photo(current_user_id)
+
+                    if not photo:
+                        send(conn, "NEED_PHOTO")
+                    else:
+                        send(conn, "SUCCESS")
+                        return current_user_id
 
                     if current_user_id == -1:
                         handle_admin(conn)
                         return -1
-                else:
-                    send(conn, "ERROR Login failed")
 
-            elif cmd == "PHOTO":
-                if current_user and current_user_id != -1:
-                    try:
-                        data_bytes = base64.b64decode(parts[1])
-                        os.makedirs(AVATAR_DIR, exist_ok=True)
-                        path = f"{AVATAR_DIR}/{current_user}.jpg"
-                        with open(path, "wb") as f:
-                            f.write(data_bytes)
-                        update_photo(current_user, path)
-                        send(conn, "PHOTO_OK")
-                        # не return
-                    except:
-                        send(conn, "ERROR Photo failed")
+                else:
+                    send(conn, "FAIL")
+
+
+            # ===== UPLOAD PHOTO =====
+            elif cmd == "UPLOAD_PHOTO":
+                if not current_user:
+                    continue
+
+                try:
+                    img_data = base64.b64decode(parts[1])
+
+                    os.makedirs("photos", exist_ok=True)
+                    path = f"photos/{current_user}.png"
+
+                    with open(path, "wb") as f:
+                        f.write(img_data)
+
+                    update_photo(current_user, path)
+
+                    send(conn, "SUCCESS")
+
+                    return current_user_id
+
+                except Exception as e:
+                    print("Photo error:", e)
+                    send(conn, "FAIL")
+
+            # ===== REGISTER =====
+            elif cmd == "REGISTER":
+                email = parts[1]
+                password = parts[2]
+
+                if register_user(email, password):
+                    send(conn, "REGISTER_SUCCESS")
+                else:
+                    send(conn, "REGISTER_FAIL")
+
+            # ===== ЗАГРУЗКА ФОТО =====
+            elif cmd == "UPLOAD_PHOTO":
+                if not current_user:
+                    continue
+
+                try:
+                    img_data = base64.b64decode(parts[1])
+
+                    os.makedirs("photos", exist_ok=True)
+                    path = f"photos/{current_user}.png"
+
+                    with open(path, "wb") as f:
+                        f.write(img_data)
+
+                    update_photo(current_user, path)
+
+                    send(conn, "SUCCESS")
+
+                except Exception as e:
+                    print("Photo error:", e)
+                    send(conn, "FAIL")
+
+            if current_user_id:
+                return current_user_id
+
+
+class GameSession:
+    def __init__(self):
+        self.board = [[" "] * 3 for _ in range(3)]
+        self.players = []
+        self.player_ids = []
+        self.symbols = ["X", "O"]
+        self.current = 0
+        self.running = True
+        self.game_id = None
+
+
+def check_winner(b, s):
+    for i in range(3):
+        if all(b[i][j] == s for j in range(3)):
+            return True
+        if all(b[j][i] == s for j in range(3)):
+            return True
+
+    if b[0][0] == b[1][1] == b[2][2] == s:
+        return True
+    if b[0][2] == b[1][1] == b[2][0] == s:
+        return True
+
+    return False
+
+
+def board_full(b):
+    return all(cell != " " for row in b for cell in row)
+
+
+def send_board(session):
+    state = ",".join(cell for row in session.board for cell in row)
+    for p in session.players:
+        send(p, f"BOARD {state}")
 
 
 def handle_player(session, conn, pid):
     send(conn, f"SYMBOL {session.symbols[pid]}")
 
-    while session.game_running:
+    while session.running:
         data = recv(conn)
         if not data:
             break
@@ -386,7 +451,7 @@ def handle_player(session, conn, pid):
 
             r, c = int(parts[1]), int(parts[2])
 
-            if pid != session.current_player:
+            if pid != session.current:
                 continue
 
             if session.board[r][c] != " ":
@@ -394,53 +459,56 @@ def handle_player(session, conn, pid):
 
             session.board[r][c] = session.symbols[pid]
 
+            save_move(session.game_id, session.player_ids[pid], r, c)
+
             if check_winner(session.board, session.symbols[pid]):
                 send_board(session)
 
-                winner_id = session.player_ids[pid]
-                save_game(session.player_ids[0], session.player_ids[1], winner_id)
+                update_game_winner(session.game_id,
+                                   session.player_ids[pid])
 
                 for p in session.players:
                     send(p, f"WIN {session.symbols[pid]}")
 
-                session.game_running = False
+                session.running = False
                 break
 
             if board_full(session.board):
                 send_board(session)
-
-                save_game(session.player_ids[0], session.player_ids[1], None)
+                update_game_winner(session.game_id, None)
 
                 for p in session.players:
                     send(p, "DRAW")
 
-                session.game_running = False
+                session.running = False
                 break
 
-            session.current_player = 1 - session.current_player
+            session.current = 1 - session.current
             send_board(session)
 
     conn.close()
+
 
 def get_session():
     with lock:
         for s in sessions:
             if len(s.players) < 2:
                 return s
+
         s = GameSession()
         sessions.append(s)
         return s
 
 
 def start_server():
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind((HOST, PORT))
-    server_socket.listen()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((HOST, PORT))
+    server.listen()
 
     print("Server started...")
 
     while True:
-        conn, addr = server_socket.accept()
+        conn, addr = server.accept()
         print("Connected:", addr)
 
         user_id = handle_auth(conn)
@@ -463,6 +531,13 @@ def start_server():
             send(conn, "WAIT")
 
         elif len(session.players) == 2:
+            # 🔥 создаём игру
+            session.game_id = save_game(
+                session.player_ids[0],
+                session.player_ids[1],
+                None
+            )
+
             for p in session.players:
                 send(p, "START")
 
@@ -474,6 +549,7 @@ def start_server():
             args=(session, conn, pid),
             daemon=True
         ).start()
+
 
 if __name__ == "__main__":
     start_server()

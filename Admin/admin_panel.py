@@ -1,5 +1,6 @@
 import socket
 import tkinter as tk
+from tkinter import ttk
 from cryptography.fernet import Fernet
 import config
 import threading
@@ -45,98 +46,141 @@ send("LOGIN admin admin123")
 
 root = tk.Tk()
 root.title("Admin Panel")
+root.geometry("650x700")
+root.configure(bg="#eaf6ff")
 
-output = tk.Text(root, width=70, height=15)
-output.pack()
+# ===================== USERS TABLE =====================
+columns = ("Email", "Photo", "Status")
+users_table = ttk.Treeview(root, columns=columns, show="headings", height=8)
 
-users_listbox = tk.Listbox(root, width=50)
-users_listbox.pack(pady=5)
+for col in columns:
+    users_table.heading(col, text=col)
+    users_table.column(col, anchor="center", width=200)
 
-selected_user = tk.StringVar()
+users_table.pack(pady=10)
+
+# ===================== BUTTONS =====================
+btn_frame = tk.Frame(root, bg="#eaf6ff")
+btn_frame.pack(pady=5)
 
 def get_users():
-    users_listbox.delete(0, tk.END)
     send("GET_USERS")
 
 def delete_user():
-    email = users_listbox.get(tk.ACTIVE)
-    if email:
-        send(f"DELETE_USER {email.split(' | ')[0]}")
+    selected = users_table.focus()
+    if not selected:
+        return
+    email = users_table.item(selected)["values"][0]
+    send(f"DELETE_USER {email}")
 
 def ban_user():
-    email = users_listbox.get(tk.ACTIVE)
-    if email:
-        send(f"BAN_USER {email.split(' | ')[0]}")
+    selected = users_table.focus()
+    if not selected:
+        return
+    email = users_table.item(selected)["values"][0]
+    send(f"BAN_USER {email}")
 
 def unban_user():
-    email = users_listbox.get(tk.ACTIVE)
-    if email:
-        send(f"UNBAN_USER {email.split(' | ')[0]}")
-
-def get_sessions():
-    output.delete("1.0", tk.END)
-    send("GET_SESSIONS")
-
+    selected = users_table.focus()
+    if not selected:
+        return
+    email = users_table.item(selected)["values"][0]
+    send(f"UNBAN_USER {email}")
 
 def get_history():
-    email = users_listbox.get(tk.ACTIVE)
-    if not email:
+    selected = users_table.focus()
+    if not selected:
         return
-
-    email = email.split(" | ")[0]
-
+    email = users_table.item(selected)["values"][0]
     send(f"GET_FULL_HISTORY_BY_EMAIL {email}")
 
+tk.Button(btn_frame, text="Refresh", command=get_users, bg="#2ecc71", fg="white", width=10).grid(row=0, column=0, padx=5)
+tk.Button(btn_frame, text="BAN", command=ban_user, bg="#9b59b6", fg="white", width=10).grid(row=0, column=1, padx=5)
+tk.Button(btn_frame, text="UNBAN", command=unban_user, bg="#8e44ad", fg="white", width=10).grid(row=0, column=2, padx=5)
+tk.Button(btn_frame, text="Delete", command=delete_user, bg="#e74c3c", fg="white", width=10).grid(row=0, column=3, padx=5)
+tk.Button(btn_frame, text="History", command=get_history, bg="#f39c12", width=10).grid(row=0, column=4, padx=5)
+
+tk.Label(root, text="Match History", bg="#2980b9", fg="white").pack()
+
+history_columns = ("Date", "Players", "Result")
+history_table = ttk.Treeview(root, columns=history_columns, show="headings", height=6)
+
+for col in history_columns:
+    history_table.heading(col, text=col)
+    history_table.column(col, anchor="center", width=200)
+
+history_table.pack(fill="both", padx=10, pady=5)
+
+tk.Label(root, text="Moves (Selected Game)", bg="#3498db", fg="white").pack()
+
+moves_columns = ("Time", "Player", "X", "Y")
+moves_table = ttk.Treeview(root, columns=moves_columns, show="headings", height=6)
+
+for col in moves_columns:
+    moves_table.heading(col, text=col)
+    moves_table.column(col, anchor="center", width=150)
+
+moves_table.pack(fill="both", padx=10, pady=5)
+
 def show_full_history(data):
-    win = tk.Toplevel()
-    win.title("История пользователя")
+    for row in history_table.get_children():
+        history_table.delete(row)
 
-    games_part, bans_part = data.split("#")
+    if "#" not in data:
+        return
 
-    tk.Label(win, text="=== ИГРЫ ===").pack()
+    games_part, bans_part = data.split("#", 1)
 
     if games_part:
         for g in games_part.split(";"):
             if not g:
                 continue
 
-            date, p1, p2, win_id = g.split("|")
+            parts = g.split("|")
+            if len(parts) < 4:
+                continue  # пропускаем некорректные записи
+            date, p1, p2, win_id = parts[:4]
 
             if win_id == "None":
-                result = "Ничья"
+                result = "Draw"
             elif win_id == p1:
-                result = f"Победил: {p1}"
+                result = f"{p1} won"
             else:
-                result = f"Победил: {p2}"
+                result = f"{p2} won"
 
-            text = f"{date} | {p1} vs {p2} | {result}"
-            tk.Label(win, text=text).pack()
+            history_table.insert("", "end",
+                                 values=(date, f"{p1} vs {p2}", result),
+                                 tags=(g,))
 
-    tk.Label(win, text="=== БАНЫ ===").pack()
+def show_moves(data):
+    for row in moves_table.get_children():
+        moves_table.delete(row)
 
-    if bans_part:
-        for b in bans_part.split(";"):
-            if not b:
-                continue
+    moves = data.split(";")
 
-            ban_date, unban_date = b.split("|")
+    for m in moves:
+        if not m:
+            continue
 
-            if unban_date == "None":
-                status = "Активен"
-            else:
-                status = f"Разбан: {unban_date}"
+        parts = m.split("|")
+        if len(parts) < 4:
+            continue
+        time, player, x, y = parts[:4]
+        moves_table.insert("", "end", values=(time, player, x, y))
 
-            text = f"Бан: {ban_date} | {status}"
-            tk.Label(win, text=text).pack()
+def on_game_select(event):
+    selected = history_table.focus()
+    if not selected:
+        return
 
+    game_data = history_table.item(selected)["tags"][0]
+    parts = game_data.split("|")
 
-tk.Button(root, text="Обновить пользователей", command=get_users).pack(pady=5)
-tk.Button(root, text="Активные игры", command=get_sessions).pack(pady=5)
-tk.Button(root, text="Удалить пользователя", command=delete_user).pack(pady=5)
-tk.Button(root, text="Забанить выбранного", command=ban_user).pack(pady=5)
-tk.Button(root, text="Разбанить выбранного", command=unban_user).pack(pady=5)
+    game_id = parts[0]
 
-tk.Button(root, text="История пользователя", command=get_history).pack(pady=5)
+    send(f"GET_MOVES_BY_GAME {game_id}")
+
+history_table.bind("<<TreeviewSelect>>", on_game_select)
 
 def receive():
     while True:
@@ -149,31 +193,34 @@ def receive():
             if line.startswith("USERS"):
                 users = line.replace("USERS ", "").split(",")
 
-                users_listbox.delete(0, tk.END)
-                output.insert(tk.END, "=== USERS ===\n")
+                for row in users_table.get_children():
+                    users_table.delete(row)
 
                 for u in users:
                     parts = u.split("|")
                     if len(parts) == 3:
                         email = parts[0]
+                        photo = parts[1]
                         banned = parts[2]
-                        display = f"{email} | banned={banned}"
-                        users_listbox.insert(tk.END, display)
-                        output.insert(tk.END, display + "\n")
 
-            elif line.startswith("SESSIONS"):
-                output.insert(tk.END, "=== SESSIONS ===\n")
-                output.insert(tk.END, line + "\n")
+                        photo_status = "OK" if photo not in ("0", "None", "", "False") else "NO"
+                        status = "BANNED" if banned == "1" else "ACTIVE"
+
+                        users_table.insert("", "end", values=(email, photo_status, status))
 
             elif line.startswith("FULL_HISTORY"):
                 data = line.split(" ", 1)[1]
                 root.after(0, show_full_history, data)
 
+            elif line.startswith("MOVES"):
+                data = line.split(" ", 1)[1]
+                root.after(0, show_moves, data)
+
             elif line == "OK":
-                output.insert(tk.END, "OK\n")
+                print("OK")
 
             elif line.startswith("ERROR"):
-                output.insert(tk.END, line + "\n")
+                print(line)
 
 threading.Thread(target=receive, daemon=True).start()
 
