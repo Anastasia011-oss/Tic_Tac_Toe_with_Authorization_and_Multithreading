@@ -6,6 +6,7 @@ from PIL import Image, ImageTk
 from cryptography.fernet import Fernet
 import base64
 import config
+from io import BytesIO
 
 HOST = config.HOST
 PORT = config.PORT
@@ -43,7 +44,6 @@ def recv():
 
     return decrypt(data)
 
-
 symbol = ""
 buttons = []
 status_label = None
@@ -56,17 +56,9 @@ root.withdraw()
 
 avatars = [None, None]
 avatar_labels = []
-current_window = None
-
 
 def choose_action():
-    global current_window
-
-    if current_window:
-        current_window.destroy()
-
     win = tk.Toplevel()
-    current_window = win
     win.title("Выбор")
 
     tk.Button(win, text="Войти",
@@ -74,7 +66,6 @@ def choose_action():
 
     tk.Button(win, text="Регистрация",
               command=lambda: open_auth(win, "REGISTER")).pack(pady=5)
-
 
 def open_auth(prev, mode):
     prev.destroy()
@@ -92,7 +83,6 @@ def open_auth(prev, mode):
 
     tk.Button(win, text="OK",
               command=lambda: send(f"{mode} {email.get()} {pw.get()}")).pack(pady=5)
-
 
 def choose_photo():
     global photo_sent
@@ -113,9 +103,8 @@ def choose_photo():
     avatars[0] = photo
     photo_sent = True
 
-
 def build_game_ui():
-    global status_label, buttons, ui_ready, last_state, avatar_labels
+    global status_label, buttons, ui_ready
 
     root.deiconify()
 
@@ -136,7 +125,7 @@ def build_game_ui():
             lbl.config(image=avatars[i])
             lbl.image = avatars[i]
 
-    status_label = tk.Label(top, text="Waiting for opponent...")
+    status_label = tk.Label(top, text="Waiting...")
     status_label.pack(side="left", padx=10)
 
     grid = tk.Frame(root)
@@ -163,8 +152,11 @@ def build_game_ui():
     if last_state:
         update_board(last_state)
 
-
 def update_board(state):
+    global last_state
+
+    last_state = state
+
     if not ui_ready:
         return
 
@@ -177,14 +169,11 @@ def update_board(state):
         c = i % 3
         buttons[r][c]["text"] = cells[i]
 
-
 def receive():
-    global symbol, last_state
+    global symbol
 
     while True:
         msg = recv()
-        print("RECV:", msg)
-
         if msg is None:
             break
 
@@ -193,30 +182,40 @@ def receive():
             if not line:
                 continue
 
-            print("LINE:", line)
+            print("RECV:", line)
 
             if line == "NEED_PHOTO":
-                if not photo_sent:
-                    root.after(0, choose_photo)
+                root.after(0, choose_photo)
 
             elif line == "SUCCESS":
                 root.after(0, build_game_ui)
 
-                if not photo_sent:
-                    root.after(0, choose_photo)
-
-            elif line == "WAIT":
+            # 🔥 ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ
+            elif line == "START":
                 root.after(0, lambda: (
-                    status_label.config(text="Waiting for opponent...")
+                    status_label.config(text="Game started!")
                     if status_label else None
                 ))
 
-            elif line.startswith("SYMBOL"):
-                symbol = line.split()[1]
+            elif line.startswith("PHOTO"):
+                parts = line.split()
+                slot = int(parts[1])
+                img_data = base64.b64decode(parts[2])
+
+                img = Image.open(BytesIO(img_data)).resize((60, 60))
+                photo = ImageTk.PhotoImage(img)
+
+                avatars[slot] = photo
+
+                def update():
+                    if slot < len(avatar_labels):
+                        avatar_labels[slot].config(image=photo)
+                        avatar_labels[slot].image = photo
+
+                root.after(0, update)
 
             elif line.startswith("BOARD"):
                 state = line.split(" ", 1)[1]
-                last_state = state
                 root.after(0, update_board, state)
 
             elif line.startswith("WIN"):
@@ -224,10 +223,6 @@ def receive():
 
             elif line == "DRAW":
                 root.after(0, lambda: messagebox.showinfo("Game", "Draw"))
-
-            elif line.startswith("ERROR"):
-                root.after(0, lambda: messagebox.showerror("Error", line))
-
 
 threading.Thread(target=receive, daemon=True).start()
 
